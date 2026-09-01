@@ -58,7 +58,10 @@ class PyserialTransport:
     def open(self) -> None:
         if self._ser is not None and self._ser.is_open:
             return
-        parity_const = _PARITY_MAP.get(self.parity.upper(), serial.PARITY_NONE)
+        try:
+            parity_const = _PARITY_MAP[self.parity.upper()]
+        except KeyError as exc:
+            raise ValueError(f"unsupported parity: {self.parity!r}") from exc
         self._ser = serial.Serial(
             port=self.port,
             baudrate=self.baud,
@@ -138,6 +141,7 @@ class FakeSerialTransport:
         self.baud = baud
 
     def open(self) -> None:
+        self._rx.clear()
         self._open = True
 
     def close(self) -> None:
@@ -170,9 +174,7 @@ class FakeSerialTransport:
     def send_break(self, duration: float = 0.25) -> None:
         self._require_open()
         del duration
-        # Optional break-triggered script entries use match_key=None after a write
-        # of b"" is uncommon; break is a no-op on the fake unless scripted via write.
-        return
+        self.recorded.append((self.baud, b"<break>"))
 
     @property
     def is_open(self) -> bool:
