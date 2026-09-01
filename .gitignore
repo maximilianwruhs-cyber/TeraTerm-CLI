@@ -17,3 +17,8 @@ smoke_fw/
 smoke_runtime/
 smoke_runtime_ok/
 smoke_runtime_fail/
+
+.worktrees/
+
+.superpowers/
+
