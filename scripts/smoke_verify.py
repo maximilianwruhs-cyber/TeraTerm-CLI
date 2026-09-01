@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-from tt_agent_hw.cli import main  # noqa: E402
+from tt_agent_hw.cli import main
 
 FIXTURE = ROOT / "tests" / "fixtures" / "fake_ttpmacro.py"
 FW = ROOT / "smoke_fw" / "fw.bin"
