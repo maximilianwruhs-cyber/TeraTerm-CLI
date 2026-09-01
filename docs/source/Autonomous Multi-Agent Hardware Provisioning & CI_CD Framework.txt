@@ -1,0 +1,410 @@
+﻿Autonomous Multi-Agent Hardware Provisioning & CI/CD Framework
+This production architecture enables an upstream Orchestration Agent (e.g., Python/Rust runtime, local LLM daemon) to deterministically configure, drive, and verify Tera Term processes (ttermpro.exe and ttpmacro.exe) across physical UARTs, virtual COM ports, and network targets without human intervention.
+
+
++-------------------------------------------------------------------------------+
+|                        Agent Orchestrator / Host CI Core                      |
+| (JSON-RPC / Subprocess / Pipeline Engine)                                     |
++---------------------------------------+---------------------------------------+
+                                        |
+                  +---------------------+---------------------+
+                  |                                           |
+                  v                                           v
++-----------------------------------+       +-----------------------------------+
+|     Worker Agent: Dynamic TTL     |       |    Worker Agent: Process Spawn    |
+|   Template Rendering & Injection  |       |   CLI Flag Assembly & Execution   |
++-----------------+-----------------+       +-----------------+-----------------+
+                  |                                           |
+                  | writes .ttl / .ini                        | invokes binary
+                  v                                           v
++-------------------------------------------------------------------------------+
+|                       Tera Term Runtime Execution Layer                       |
+|                                                                               |
+|  [ ttpmacro.exe ] <==== DDE Control Channel ====> [ ttermpro.exe (Headless) ] |
+|         |                                                      |              |
+|         +-- YMODEM / XMODEM Transfer Engine                    |              |
+|         +-- Strict String / Regex Matcher (Oniguruma)          |              |
+|         +-- Deterministic Exit Codes via File System           |              |
++----------------------------------------------------------------+--------------+
+                                                                 |
+                                       +-------------------------+-------------------------+
+                                       |                                                   |
+                                       v                                                   v
+                         [ Physical / Virtual UART ]                             [ SSH2 / SOCKS Socket ]
+                         (Target Hardware / Bootloader)                          (Network Target Device)
+
+
+Phase 1: Environment & Artifact Scaffolding
+Set up a deterministic, hermetic directory layout to eliminate state pollution between pipeline runs.
+
+
+1. File Structure
+Plaintext
+C:\agent_runtime\
+├── bin\
+│   ├── ttermpro.exe
+│   ├── ttpmacro.exe
+│   └── cygterm.exe
+├── config\
+│   ├── base_teraterm.ini
+│   └── keyboard.cnf
+├── workspaces\
+│   └── run_<UUID>\
+│       ├── run.ini
+│       ├── task.ttl
+│       ├── logs\
+│       │   └── console.log
+│       ├── artifacts\
+│       │   └── firmware.bin
+│       └── status\
+│           └── execution.state
+
+
+2. Agent Base Configuration Template (config\base_teraterm.ini)
+Ini, TOML
+[Tera Term]
+; Run headlessly without modal interruption
+HideTitle=on
+AutoWinClose=on
+ConfirmDisconnect=off
+
+
+; Encoding & Buffer Configuration
+KanjiReceive=UTF8
+KanjiSend=UTF8
+ScrollBuffSize=100000
+
+
+; Performance & Timing Pacing
+FileSendHighSpeedMode=on
+DelayPerChar=0
+DelayPerLine=0
+
+
+; Robust Paste Protection
+BracketedSupport=on
+BracketedControlOnly=on
+
+
+; Automated Log Rotation Defaults
+LogRotate=0
+LogTimestamp=1
+LogTimestampFormat=3 ; UTC format
+
+
+Phase 2: Dynamic TTL Synthesis & Contract Protocols
+Because ttpmacro.exe does not provide dynamic standard exit codes back to Windows shells directly from macro errors, the agent enforces a state-file handshake protocol using JSON/key-value output files.
+
+
+Jinja2 TTL Execution Template (task_template.ttl.j2)
+Code-Snippet
+; ==============================================================================
+; Auto-generated TTL Macro for Agent Run: {{ execution_id }}
+; Target: COM{{ com_port }} @ {{ baud_rate }} bps
+; ==============================================================================
+
+
+StateFile = '{{ status_dir }}\execution.state'
+LogFile   = '{{ log_dir }}\console.log'
+
+
+; Helper subroutine to write deterministic status
+goto Main
+
+
+:ReportStatus
+    fileopen fHandle StateFile 0
+    filelock fHandle
+    filewrite fHandle CurrentState
+    fileunlock fHandle
+    fileclose fHandle
+    return
+
+
+:Main
+CurrentState = 'STATUS=INITIALIZING'
+call ReportStatus
+
+
+; Setup Headless Connection Parameters
+sprintf2 ConnCmd '/C={{ com_port }} /BAUD={{ baud_rate }} /L="%s" /H /AUTOWINCLOSE=on' LogFile
+connect ConnCmd
+
+
+if result != 2 then
+    CurrentState = 'STATUS=FAILED_CONNECTION_REFUSED'
+    call ReportStatus
+    end
+endif
+
+
+; Flush serial RX FIFO and send break sequence to catch bootloader
+flushrecv
+timeout = 5
+sendbreak
+mpause 50
+sendln ''
+
+
+wait '{{ boot_prompt }}'
+if result == 0 then
+    CurrentState = 'STATUS=FAILED_BOOT_PROMPT_TIMEOUT'
+    call ReportStatus
+    disconnect
+    end
+endif
+
+
+; Stage Flash Erase
+sendln '{{ erase_command }}'
+wait '{{ erase_ack }}' 'ERROR'
+if result != 1 then
+    CurrentState = 'STATUS=FAILED_FLASH_ERASE'
+    call ReportStatus
+    disconnect
+    end
+endif
+
+
+; Trigger Protocol Transfer
+sendln '{{ transfer_trigger_command }}'
+wait 'C'
+if result == 0 then
+    CurrentState = 'STATUS=FAILED_YMODEM_READY_TIMEOUT'
+    call ReportStatus
+    disconnect
+    end
+endif
+
+
+ymodemsend '{{ binary_path }}'
+if result == 0 then
+    CurrentState = 'STATUS=FAILED_YMODEM_TRANSFER_ABORTED'
+    call ReportStatus
+    disconnect
+    end
+endif
+
+
+; Write Memory & Validate Verification Regex
+sendln '{{ boot_command }}'
+timeout = {{ boot_timeout }}
+waitregex '{{ boot_success_regex }}' 'Kernel panic' 'Hard Fault'
+
+
+if result == 1 then
+    CurrentState = 'STATUS=SUCCESS_PROVISIONED'
+    call ReportStatus
+elseif result == 2 or result == 3 then
+    CurrentState = 'STATUS=FAILED_TARGET_CRASH'
+    call ReportStatus
+else
+    CurrentState = 'STATUS=FAILED_BOOT_TIMEOUT'
+    call ReportStatus
+endif
+
+
+disconnect
+end
+
+
+Phase 3: Agent Orchestrator Implementation
+This Python controller synthesizes configurations, launches ttpmacro.exe asynchronously, monitors output logs in real time, and validates execution states.
+
+
+Python
+import os
+import subprocess
+import time
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from jinja2 import Template
+
+
+@dataclass
+class TargetJob:
+    com_port: int
+    baud_rate: int
+    boot_prompt: str
+    erase_command: str
+    erase_ack: str
+    transfer_trigger_command: str
+    boot_command: str
+    boot_success_regex: str
+    boot_timeout: int
+    binary_path: Path
+
+
+class TeraTermAgentController:
+    def __init__(self, base_dir: Path, tt_bin_dir: Path):
+        self.base_dir = base_dir
+        self.tt_bin_dir = tt_bin_dir
+        self.macro_exe = tt_bin_dir / "ttpmacro.exe"
+        self.term_exe = tt_bin_dir / "ttermpro.exe"
+
+
+    def execute_provisioning(self, job: TargetJob) -> dict:
+        run_id = f"run_{uuid.uuid4().hex[:8]}"
+        workspace = self.base_dir / "workspaces" / run_id
+        log_dir = workspace / "logs"
+        status_dir = workspace / "status"
+        
+        for p in (log_dir, status_dir):
+            p.mkdir(parents=True, exist_ok=True)
+
+
+        status_file = status_dir / "execution.state"
+        log_file = log_dir / "console.log"
+        macro_file = workspace / "task.ttl"
+
+
+        # 1. Render Dynamic Macro Template
+        template_str = Path("task_template.ttl.j2").read_text(encoding="utf-8")
+        rendered_ttl = Template(template_str).render(
+            execution_id=run_id,
+            com_port=job.com_port,
+            baud_rate=job.baud_rate,
+            boot_prompt=job.boot_prompt,
+            erase_command=job.erase_command,
+            erase_ack=job.erase_ack,
+            transfer_trigger_command=job.transfer_trigger_command,
+            boot_command=job.boot_command,
+            boot_success_regex=job.boot_success_regex,
+            boot_timeout=job.boot_timeout,
+            binary_path=str(job.binary_path).replace("\\", "\\\\"),
+            log_dir=str(log_dir).replace("\\", "\\\\"),
+            status_dir=str(status_dir).replace("\\", "\\\\")
+        )
+        macro_file.write_text(rendered_ttl, encoding="ascii")
+
+
+        # 2. Spawn Subprocess Running Macro Engine
+        cmd = [str(self.macro_exe), f"/V", str(macro_file)]
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=str(self.tt_bin_dir)
+        )
+
+
+        # 3. Telemetry Polling Loop
+        max_duration = job.boot_timeout + 60
+        start_time = time.monotonic()
+        final_status = "STATUS=TIMEOUT_ORCHESTRATOR"
+
+
+        while (time.monotonic() - start_time) < max_duration:
+            if status_file.exists():
+                try:
+                    content = status_file.read_text(encoding="ascii").strip()
+                    if content.startswith("STATUS="):
+                        final_status = content
+                        if "SUCCESS" in content or "FAILED" in content:
+                            break
+                except PermissionError:
+                    pass  # Retrying locked file read
+
+
+            if process.poll() is not None:
+                break
+            time.sleep(0.5)
+
+
+        # 4. Clean up dangling processes if hung
+        if process.poll() is None:
+            process.kill()
+
+
+        return {
+            "run_id": run_id,
+            "status": final_status,
+            "log_file": str(log_file),
+            "duration_sec": round(time.monotonic() - start_time, 2)
+        }
+
+
+Phase 4: Production Error Handling & Self-Healing Matrix
+Failure Mode
+	Root Cause Detection
+	Agentic Remediation / Self-Healing
+	FAILED_CONNECTION_REFUSED
+	COM port held by zombie ttermpro.exe or port not mounted.
+	Agent executes taskkill /F /IM ttermpro.exe, waits for USB re-enumeration using setupapi.dll query, then retries.
+	FAILED_BOOT_PROMPT_TIMEOUT
+	Missed autoboot trigger due to UART clock drift or pacing issues.
+	Agent increases CDELAYPERCHAR to 1000 µs in the fallback profile and triggers a hardware relay power cycle.
+	FAILED_YMODEM_TRANSFER_ABORTED
+	Buffer overrun or CRC calculation timeout.
+	Agent switches from YMODEM to XMODEM-CRC fallback mode and drops baud rate to 115200.
+	STATUS=TIMEOUT_ORCHESTRATOR
+	Dynamic Data Exchange (DDE) failure between macro engine and UI.
+	Agent issues an emergency process kill tree, purges stale .state files, and re-allocates a clean temporary workspace.
+	Phase 5: CI/CD Pipeline Integration (GitHub Actions / GitLab CI)
+Below is an automated pipeline step running on a self-hosted Windows runner attached to the hardware bench:
+YAML
+name: Hardware Handoff & Flash Pipeline
+
+
+on:
+  push:
+    branches: [ main ]
+
+
+jobs:
+  flash_and_verify:
+    runs-on: [ self-hosted, windows, hw-bench-com4 ]
+    steps:
+      - name: Checkout Firmware Artifacts
+        uses: actions/checkout@v4
+
+
+      - name: Setup Python Orchestration Environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+
+      - name: Run Tera Term Agentic Provisioning
+        run: |
+          python -m pip install jinja2
+          python -c "
+          from pathlib import Path
+          from orchestrator import TeraTermAgentController, TargetJob
+
+
+          agent = TeraTermAgentController(
+              base_dir=Path('C:/agent_runtime'),
+              tt_bin_dir=Path('C:/Program Files (x86)/teraterm')
+          )
+          
+          job = TargetJob(
+              com_port=4,
+              baud_rate=115200,
+              boot_prompt='U-Boot>',
+              erase_command='sf probe 0; sf erase 0x0 0x100000',
+              erase_ack='SF: 1048576 bytes @ 0x0 Erased: OK',
+              transfer_trigger_command='loady 0x80000000 115200',
+              boot_command='bootm 0x80000000',
+              boot_success_regex='System Ready: System initialization complete',
+              boot_timeout=30,
+              binary_path=Path('build/firmware.bin').resolve()
+          )
+
+
+          result = agent.execute_provisioning(job)
+          print(f'Execution Output: {result}')
+
+
+          if 'SUCCESS' not in result['status']:
+              raise SystemExit(f'Hardware deployment failed with status: {result[\"status\"]}')
+          "
+
+
+      - name: Archive Console Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardware-console-log
+          path: C:/agent_runtime/workspaces/**/logs/console.log
