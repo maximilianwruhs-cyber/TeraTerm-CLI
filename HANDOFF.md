@@ -1,10 +1,20 @@
 # Handoff: tt-agent-hw — Tera Term Hardware Provisioning Orchestrator (v1)
 
 **Timestamp:** 2026-09-01 (session-local, no wall-clock UTC source available in this environment)
-**Status:** Complete (v1 scope: single-target flash+verify via mock; real-hardware run not yet exercised)
+**Status:** Complete for what's reachable here — real-binary verified (engine, TCP connect, full CLI pipeline); serial-success path blocked by locked-down environment (no admin for com0com, no RS232 adapter).
 **Primary Objectives:** Stand up a standalone (non-GZMO) Windows project that drives Tera Term (`ttpmacro.exe`/`ttermpro.exe`) to flash and boot-verify one UART target headlessly, with a file-based STATUS handshake and hardware-free mock tests.
 
 ---
+> **Addendum 2026-09-01 (real Tera Term 5.6.2 installed):** The mock-only
+> caveat below is partially closed. Against the **real** binaries we verified
+> `doctor` (4/4 OK), the macro engine + STATUS handshake, real
+> `connect`/`wait`/`sendln` over TCP, and the full CLI `provision` pipeline
+> (genuine COM4 attempt → `FAILED_CONNECTION_REFUSED` → exit 1). The serial
+> **success** path (`/C=` open + `ymodemsend`) stays blocked — com0com's
+> kernel driver needs admin (denied here; Zscaler also blocked its download)
+> and no RS232 adapter is available. Full detail + reproduce commands:
+> `docs/superpowers/reports/2026-09-01-real-binary-verification.md`.
+
 
 ## 1. Executive Summary & Changes Made
 

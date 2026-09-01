@@ -5,11 +5,15 @@ close the gap the mock tests cannot: they only run when Tera Term is
 actually installed. They avoid the serial/YMODEM/bootloader path (no RS232
 adapter) except Depth 3, which substitutes a virtual serial pair.
 
-| Spike | Proves | Needs |
-|-------|--------|-------|
-| `verify_real_engine.py` | Real macro engine runs a rendered TTL and the `STATUS=*` file handshake round-trips through the actual binary | Tera Term only |
-| `verify_tcp_loopback.py` | Real `connect` / `wait` / `sendln` work end-to-end over TCP (127.0.0.1 by default) | Tera Term only |
-| `fake_uboot_device.py` | Enables a REAL `tt-agent-hw provision` **success** over a virtual serial port | Tera Term + com0com + pyserial |
+| Spike | Proves | Needs | Status (2026-09-01) |
+|-------|--------|-------|---------------------|
+| `verify_real_engine.py` | Real macro engine runs a rendered TTL and the `STATUS=*` handshake round-trips through the actual binary | Tera Term only | ✅ PASS |
+| `verify_tcp_loopback.py` | Real `connect` / `wait` / `sendln` end-to-end over TCP (127.0.0.1 default) | Tera Term only | ✅ PASS |
+| `depth1_cli_provision.py` | Full real CLI pipeline; expected `FAILED_CONNECTION_REFUSED` with no device | Tera Term only | ✅ PASS (exit 1 expected) |
+| `fake_uboot_device.py` | Enables a REAL `tt-agent-hw provision` **success** over a virtual serial port | Tera Term + com0com + pyserial | ⛔ blocked (no admin) |
+| `verify_named_pipe_ymodem.py` | No-admin real `ymodemsend` over a named pipe | Tera Term only | ⚠️ EXPERIMENTAL — hangs (telnet IAC), not passing |
+
+Results detail: `../docs/superpowers/reports/2026-09-01-real-binary-verification.md`.
 
 ## Testing the CLI itself against real Tera Term
 
