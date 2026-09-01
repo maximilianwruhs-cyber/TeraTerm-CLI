@@ -1,0 +1,93 @@
+; ==============================================================================
+; Auto-generated TTL Macro for Agent Run: {{ execution_id }}
+; Target: COM{{ com_port }} @ {{ baud_rate }} bps
+; ==============================================================================
+
+StateFile = '{{ status_file }}'
+LogFile   = '{{ log_file }}'
+
+goto Main
+
+:ReportStatus
+    fileopen fHandle StateFile 0
+    filelock fHandle
+    filewrite fHandle CurrentState
+    fileunlock fHandle
+    fileclose fHandle
+    return
+
+:Main
+CurrentState = 'STATUS=INITIALIZING'
+call ReportStatus
+
+; Setup Headless Connection Parameters
+sprintf2 ConnCmd '/C={{ com_port }} /BAUD={{ baud_rate }} /L="%s" /H /AUTOWINCLOSE=on' LogFile
+connect ConnCmd
+
+if result != 2 then
+    CurrentState = 'STATUS=FAILED_CONNECTION_REFUSED'
+    call ReportStatus
+    end
+endif
+
+; Flush serial RX FIFO and send break sequence to catch bootloader
+flushrecv
+timeout = 5
+sendbreak
+mpause 50
+sendln ''
+
+wait '{{ boot_prompt }}'
+if result == 0 then
+    CurrentState = 'STATUS=FAILED_BOOT_PROMPT_TIMEOUT'
+    call ReportStatus
+    disconnect
+    end
+endif
+
+; Stage Flash Erase
+sendln '{{ erase_command }}'
+wait '{{ erase_ack }}' 'ERROR'
+if result != 1 then
+    CurrentState = 'STATUS=FAILED_FLASH_ERASE'
+    call ReportStatus
+    disconnect
+    end
+endif
+
+; Trigger Protocol Transfer
+sendln '{{ transfer_trigger_command }}'
+wait 'C'
+if result == 0 then
+    CurrentState = 'STATUS=FAILED_YMODEM_READY_TIMEOUT'
+    call ReportStatus
+    disconnect
+    end
+endif
+
+ymodemsend '{{ binary_path }}'
+if result == 0 then
+    CurrentState = 'STATUS=FAILED_YMODEM_TRANSFER_ABORTED'
+    call ReportStatus
+    disconnect
+    end
+endif
+
+; Write Memory & Validate Verification Regex
+sendln '{{ boot_command }}'
+timeout = {{ boot_timeout }}
+waitregex '{{ boot_success_regex }}' 'Kernel panic' 'Hard Fault'
+
+if result == 1 then
+    CurrentState = 'STATUS=SUCCESS_PROVISIONED'
+    call ReportStatus
+elseif result == 2 or result == 3 then
+    CurrentState = 'STATUS=FAILED_TARGET_CRASH'
+    call ReportStatus
+else
+    CurrentState = 'STATUS=FAILED_BOOT_TIMEOUT'
+    call ReportStatus
+endif
+
+disconnect
+end

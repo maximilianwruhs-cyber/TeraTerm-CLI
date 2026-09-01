@@ -13,3 +13,7 @@ build/
 htmlcov/
 .DS_Store
 Thumbs.db
+smoke_fw/
+smoke_runtime/
+smoke_runtime_ok/
+smoke_runtime_fail/
