@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tt-agent-hw"
-version = "0.1.0"
+version = "0.2.0"
 description = "Autonomous single-target Tera Term hardware flash+verify orchestrator"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -12,6 +12,7 @@ license = "MIT"
 authors = [{ name = "tt-agent-hw" }]
 dependencies = [
     "jinja2>=3.1",
+    "pyserial>=3.5",
 ]
 
 [project.optional-dependencies]
