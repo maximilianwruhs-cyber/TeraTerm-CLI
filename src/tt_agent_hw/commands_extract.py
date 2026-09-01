@@ -6,12 +6,14 @@ import re
 
 from tt_agent_hw.models import DiscoveredCommand
 
-_SEP_RE = re.compile(r"\s+[-—]\s+|:\s+")
+_DASH_SEP_RE = re.compile(r"\s+[-—]\s+")
+_COLON_SEP_RE = re.compile(r":\s+")
 _AT_RE = re.compile(r"\b(AT\+[A-Za-z0-9_]+)\b")
 _BARE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{1,31}$")
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9]+")
 _JUNK_RE = re.compile(r"^[\d.\-_/\\]+$")
 _PATH_RE = re.compile(r"[/\\]")
+_BULLET_RE = re.compile(r"^[\-\*\u2022\u25cf\u00b7]\s+")
 
 
 def slug_id(send: str) -> str:
@@ -54,32 +56,55 @@ def _parse_line(line: str) -> list[tuple[str, str]]:
     if not s or set(s) <= {"-", "=", "*"}:
         return []
 
+    # Strip leading list bullets so "- reset - reboot" still parses.
+    while True:
+        stripped = _BULLET_RE.sub("", s, count=1)
+        if stripped == s:
+            break
+        s = stripped.strip()
+        if not s:
+            return []
+
     found: list[tuple[str, str]] = []
+    seen_local: set[str] = set()
 
-    # cmd - desc | cmd — desc | cmd: desc
-    parts = _SEP_RE.split(s, maxsplit=1)
-    if len(parts) == 2:
-        left = parts[0].strip()
-        right = parts[1].strip()
-        # take first token of left as command
-        token = left.split()[0] if left.split() else ""
-        if token and not _is_junk_token(token):
-            if _BARE_RE.fullmatch(token) or token.startswith("AT+") or token == "?":
-                found.append((token, right))
-                return found
+    def _add(send: str, summary: str) -> None:
+        if send in seen_local or _is_junk_token(send):
+            return
+        if not (_BARE_RE.fullmatch(send) or send.startswith("AT+") or send == "?"):
+            return
+        seen_local.add(send)
+        found.append((send, summary))
 
-    # AT+... anywhere on the line
+    # cmd - desc | cmd — desc (left must be a single token)
+    dash_parts = _DASH_SEP_RE.split(s, maxsplit=1)
+    if len(dash_parts) == 2:
+        left = dash_parts[0].strip()
+        right = dash_parts[1].strip()
+        if left and len(left.split()) == 1:
+            _add(left, right)
+
+    # cmd: desc — left must be exactly one token (skips "Available commands: …")
+    colon_parts = _COLON_SEP_RE.split(s, maxsplit=1)
+    if len(colon_parts) == 2:
+        left = colon_parts[0].strip()
+        right = colon_parts[1].strip()
+        if left and len(left.split()) == 1:
+            # Header lines like "Commands: AT+RST" should not emit "Commands";
+            # AT+ tokens on the line are picked up below instead.
+            if not _AT_RE.search(s) or left.upper().startswith("AT+"):
+                _add(left, right)
+
+    # Always scan for AT+... tokens (no early return after separators).
     for m in _AT_RE.finditer(s):
-        tok = m.group(1)
-        if not _is_junk_token(tok):
-            found.append((tok, ""))
+        _add(m.group(1), "")
 
     if found:
         return found
 
     # bare single-token line
-    if _BARE_RE.fullmatch(s) and not _is_junk_token(s):
-        found.append((s, ""))
+    if _BARE_RE.fullmatch(s):
+        _add(s, "")
 
     return found
 

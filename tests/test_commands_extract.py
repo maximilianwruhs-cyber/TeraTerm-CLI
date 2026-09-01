@@ -15,3 +15,39 @@ def test_extract_nudge_and_parsed():
     assert "reset" in sends
     assert "status" in sends
     assert all(c.id for c in cmds)
+    # Multi-word header must not become a command
+    assert "Available" not in sends
+    assert "commands" not in sends
+
+
+def test_extract_at_plus_and_header():
+    raw = "Commands: AT+RST AT+GMR\nAT+CSQ - signal quality\n"
+    cmds = extract_commands(raw, productive_nudges=[])
+    sends = [c.send for c in cmds]
+    assert "AT+RST" in sends
+    assert "AT+GMR" in sends
+    assert "AT+CSQ" in sends
+    assert "Commands" not in sends
+    by_send = {c.send: c for c in cmds}
+    assert by_send["AT+CSQ"].summary == "signal quality"
+    assert by_send["AT+CSQ"].source == "parsed_help"
+    assert by_send["AT+GMR"].id == "at_gmr"
+
+
+def test_extract_bullet_line():
+    raw = "- reset - reboot board\n* status: show status\n"
+    cmds = extract_commands(raw, productive_nudges=[])
+    sends = [c.send for c in cmds]
+    assert "reset" in sends
+    assert "status" in sends
+
+
+def test_id_collision_suffix():
+    # Two different sends that slug to the same base id
+    raw = "AT+GMR - modem rev\nat gmr - spaced variant\n"
+    # spaced variant won't parse as one token; force collision via nudges + parse
+    cmds = extract_commands("AT+GMR - modem rev\n", productive_nudges=["at/gmr"])
+    ids = [c.id for c in cmds]
+    assert "at_gmr" in ids
+    assert "at_gmr_2" in ids
+    assert len(ids) == len(set(ids))
