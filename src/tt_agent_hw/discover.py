@@ -14,6 +14,7 @@ from tt_agent_hw.commands_extract import extract_commands
 from tt_agent_hw.models import BaudAttempt, DeviceProfile, DiscoverResult
 from tt_agent_hw.profile_store import save_profile
 from tt_agent_hw.scoring import SILENCE_FLOOR, STRONG_SCORE, score_rx
+from tt_agent_hw.serial_io import read_until_quiet  # re-export for callers/tests
 from tt_agent_hw.serial_transport import PyserialTransport, SerialTransport
 from tt_agent_hw.status import (
     FAILED_PROBE_SILENT,
@@ -54,49 +55,6 @@ TransportFactory = Callable[[str, int], SerialTransport]
 
 def _default_transport_factory(port: str, baud: int) -> SerialTransport:
     return PyserialTransport(port=port, baud=baud)
-
-
-def read_until_quiet(
-    transport: SerialTransport,
-    *,
-    quiet_s: float = 0.25,
-    max_s: float = 2.0,
-    first_byte_s: float = 0.75,
-) -> bytes:
-    """Read RX until a quiet gap or overall cap is reached.
-
-    Before any RX arrives, wait up to ``first_byte_s`` (capped by ``max_s``).
-    After RX has started, stop once ``quiet_s`` elapses with no further bytes.
-    """
-    buf = bytearray()
-    start = time.monotonic()
-    got_data = False
-    last_rx = start
-    first_budget = min(first_byte_s, max_s)
-    while True:
-        now = time.monotonic()
-        elapsed = now - start
-        if elapsed >= max_s:
-            break
-        remaining = max_s - elapsed
-        if not got_data:
-            if elapsed >= first_budget:
-                break
-            slice_s = min(0.05, remaining, first_budget - elapsed)
-        else:
-            quiet_elapsed = now - last_rx
-            if quiet_elapsed >= quiet_s:
-                break
-            slice_s = min(0.05, remaining, quiet_s - quiet_elapsed)
-        chunk = transport.read(4096, timeout=max(0.0, slice_s))
-        if chunk:
-            buf.extend(chunk)
-            got_data = True
-            last_rx = time.monotonic()
-            continue
-        # Fake transports return immediately on empty; avoid a tight spin.
-        time.sleep(min(0.01, max(slice_s, 0.001)))
-    return bytes(buf)
 
 
 def _utc_now_iso() -> str:
