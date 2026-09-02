@@ -61,26 +61,41 @@ def read_until_quiet(
     *,
     quiet_s: float = 0.25,
     max_s: float = 2.0,
+    first_byte_s: float = 0.75,
 ) -> bytes:
-    """Read RX until a quiet gap or overall cap is reached."""
+    """Read RX until a quiet gap or overall cap is reached.
+
+    Before any RX arrives, wait up to ``first_byte_s`` (capped by ``max_s``).
+    After RX has started, stop once ``quiet_s`` elapses with no further bytes.
+    """
     buf = bytearray()
     start = time.monotonic()
+    got_data = False
     last_rx = start
+    first_budget = min(first_byte_s, max_s)
     while True:
         now = time.monotonic()
         elapsed = now - start
         if elapsed >= max_s:
             break
         remaining = max_s - elapsed
-        chunk = transport.read(4096, timeout=min(0.05, remaining, quiet_s))
+        if not got_data:
+            if elapsed >= first_budget:
+                break
+            slice_s = min(0.05, remaining, first_budget - elapsed)
+        else:
+            quiet_elapsed = now - last_rx
+            if quiet_elapsed >= quiet_s:
+                break
+            slice_s = min(0.05, remaining, quiet_s - quiet_elapsed)
+        chunk = transport.read(4096, timeout=max(0.0, slice_s))
         if chunk:
             buf.extend(chunk)
+            got_data = True
             last_rx = time.monotonic()
             continue
-        if time.monotonic() - last_rx >= quiet_s:
-            break
         # Fake transports return immediately on empty; avoid a tight spin.
-        time.sleep(min(0.01, quiet_s))
+        time.sleep(min(0.01, max(slice_s, 0.001)))
     return bytes(buf)
 
 
@@ -141,6 +156,7 @@ def _harvest_help(
     if not productive:
         return fallback_raw
     _name, payload = _preferred_harvest_nudge(productive)
+    transport.reset_input_buffer()
     transport.write(payload)
     harvested = read_until_quiet(transport)
     return harvested if harvested else fallback_raw
@@ -303,7 +319,8 @@ def run_discover(
 
     help_text = help_raw.decode("utf-8", errors="replace")
     help_path = ws.artifacts_dir / "help_raw.txt"
-    help_path.write_text(help_text, encoding="utf-8", errors="replace")
+    # Binary write preserves device CRLF; text mode would expand \n → \r\n on Windows.
+    help_path.write_bytes(help_raw)
     help_sha = hashlib.sha256(help_raw).hexdigest()
 
     productive_sends: list[str] = []
