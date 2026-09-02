@@ -1,4 +1,4 @@
-"""CLI: tt-agent-hw doctor | provision."""
+"""CLI: tt-agent-hw doctor | provision | ports | discover | profile | cmds | call."""
 
 from __future__ import annotations
 
@@ -11,8 +11,46 @@ from tt_agent_hw import __version__
 from tt_agent_hw.controller import PreflightError, TeraTermAgentController
 from tt_agent_hw.models import TargetJob
 from tt_agent_hw.paths import runtime_dir, tt_bin_dir
-from tt_agent_hw.status import is_success
+from tt_agent_hw.profile_store import load_profile
+from tt_agent_hw.status import (
+    FAILED_NO_PORT,
+    FAILED_PROBE_SILENT,
+    SUCCESS_DISCOVERED,
+    is_success,
+)
 from tt_agent_hw.workspace import ensure_runtime_writable
+
+# Discover connection-refused token (also in status.KNOWN_FAILURE).
+_FAILED_CONNECTION_REFUSED = "STATUS=FAILED_CONNECTION_REFUSED"
+
+
+def list_ports(*, runtime_dir: Path | None = None, enumerator=None):
+    """Lazy seam: ports pulls pyserial; monkeypatch this name in tests."""
+    from tt_agent_hw.ports import list_ports as _impl
+
+    return _impl(runtime_dir=runtime_dir, enumerator=enumerator)
+
+
+def resolve_default_com(ports):
+    """Lazy seam for default COM selection."""
+    from tt_agent_hw.ports import resolve_default_com as _impl
+
+    return _impl(ports)
+
+
+def run_discover(**kwargs):
+    """Lazy seam: discover pulls serial transport; monkeypatch in tests."""
+    from tt_agent_hw.discover import run_discover as _impl
+
+    return _impl(**kwargs)
+
+
+def run_call(**kwargs):
+    """Lazy seam: call_session pulls serial transport; monkeypatch in tests."""
+    from tt_agent_hw.call_session import run_call as _impl
+
+    return _impl(**kwargs)
+
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -59,7 +97,89 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print result as JSON",
     )
+
+    sp = sub.add_parser("ports", help="List serial ports")
+    sp.add_argument("--json", action="store_true", help="Print ports as JSON")
+    sp.add_argument(
+        "--runtime-dir",
+        type=Path,
+        default=None,
+        help="Override TT_AGENT_RUNTIME_DIR",
+    )
+
+    sd = sub.add_parser("discover", help="Probe UART and write device profile")
+    sd.add_argument("--com", type=int, default=None, help="COM port index (default: auto)")
+    sd.add_argument("--baud", type=int, default=None, help="Single baud to try")
+    sd.add_argument(
+        "--baud-list",
+        type=str,
+        default=None,
+        help="Comma-separated baud list (e.g. 115200,9600)",
+    )
+    sd.add_argument(
+        "--no-early-stop",
+        action="store_true",
+        help="Try full baud list even after a strong hit",
+    )
+    sd.add_argument(
+        "--no-break",
+        action="store_true",
+        help="Skip serial break before probe",
+    )
+    sd.add_argument("--json", action="store_true", help="Print result as JSON")
+    sd.add_argument(
+        "--runtime-dir",
+        type=Path,
+        default=None,
+        help="Override TT_AGENT_RUNTIME_DIR",
+    )
+
+    prof = sub.add_parser("profile", help="Inspect saved device profiles")
+    prof_sub = prof.add_subparsers(dest="profile_cmd", required=True)
+    ps = prof_sub.add_parser("show", help="Show profile for a COM port")
+    ps.add_argument("--com", type=int, required=True, help="COM port index")
+    ps.add_argument("--json", action="store_true", help="Print profile as JSON")
+    ps.add_argument(
+        "--runtime-dir",
+        type=Path,
+        default=None,
+        help="Override TT_AGENT_RUNTIME_DIR",
+    )
+
+    sc = sub.add_parser("cmds", help="List discovered commands for a COM port")
+    sc.add_argument("--com", type=int, required=True, help="COM port index")
+    sc.add_argument("--json", action="store_true", help="Print commands as JSON")
+    sc.add_argument(
+        "--runtime-dir",
+        type=Path,
+        default=None,
+        help="Override TT_AGENT_RUNTIME_DIR",
+    )
+
+    sca = sub.add_parser("call", help="Send a command against a discovered profile")
+    sca.add_argument("--com", type=int, required=True, help="COM port index")
+    sca.add_argument("command_id", nargs="?", default=None, help="Discovered command id")
+    sca.add_argument("--send", type=str, default=None, help="Raw text to send (XOR with id)")
+    sca.add_argument("--expect", type=str, default=None, help="Regex expected in RX")
+    sca.add_argument(
+        "--timeout",
+        type=float,
+        default=3.0,
+        help="RX timeout seconds (default 3.0)",
+    )
+    sca.add_argument("--json", action="store_true", help="Print result as JSON")
+    sca.add_argument(
+        "--runtime-dir",
+        type=Path,
+        default=None,
+        help="Override TT_AGENT_RUNTIME_DIR",
+    )
+
     return parser
+
+
+def _runtime(args: argparse.Namespace) -> Path:
+    return Path(args.runtime_dir) if getattr(args, "runtime_dir", None) else runtime_dir()
 
 
 def cmd_doctor(runtime: Path, tt_bin: Path) -> int:
@@ -73,6 +193,14 @@ def cmd_doctor(runtime: Path, tt_bin: Path) -> int:
     except Exception as exc:  # noqa: BLE001
         ok = False
         checks.append(("package_import", False, str(exc)))
+
+    try:
+        import serial  # noqa: F401
+
+        checks.append(("pyserial", True, getattr(serial, "__version__", "ok")))
+    except Exception as exc:  # noqa: BLE001
+        ok = False
+        checks.append(("pyserial", False, str(exc)))
 
     try:
         ensure_runtime_writable(runtime)
@@ -151,6 +279,198 @@ def cmd_provision(args: argparse.Namespace) -> int:
     return 3
 
 
+def cmd_ports(args: argparse.Namespace) -> int:
+    base = _runtime(args)
+    try:
+        ports = list_ports(runtime_dir=base)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ports error: {exc}", file=sys.stderr)
+        return 2
+
+    payload = [
+        {
+            "name": p.name,
+            "com": p.com,
+            "description": p.description,
+            "hardware_id": p.hardware_id,
+            "has_profile": p.has_profile,
+        }
+        for p in ports
+    ]
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        if not ports:
+            print("(no serial ports)")
+        for p in ports:
+            profile = "profile" if p.has_profile else "no-profile"
+            print(f"{p.name}\t{p.description}\t{profile}")
+    return 0
+
+
+def _parse_baud_list(args: argparse.Namespace) -> list[int] | None:
+    """Return baud list or None for discover defaults. Raises ValueError on bad input."""
+    if args.baud is not None:
+        return [int(args.baud)]
+    if args.baud_list is not None:
+        parts = [p.strip() for p in str(args.baud_list).split(",") if p.strip()]
+        if not parts:
+            raise ValueError("empty --baud-list")
+        try:
+            return [int(p) for p in parts]
+        except ValueError as exc:
+            raise ValueError(f"invalid --baud-list: {args.baud_list!r}") from exc
+    return None
+
+
+def _usb_hint_for_com(ports, com: int) -> dict | None:
+    for p in ports:
+        if p.com == com:
+            return {
+                "name": p.name,
+                "description": p.description,
+                "hardware_id": p.hardware_id,
+            }
+    return None
+
+
+def cmd_discover(args: argparse.Namespace) -> int:
+    base = _runtime(args)
+    ports: list = []
+    try:
+        ports = list_ports(runtime_dir=base)
+    except Exception as exc:  # noqa: BLE001
+        if args.com is None:
+            print(f"ports error: {exc}", file=sys.stderr)
+            return 2
+        # Explicit --com: continue without enumeration / usb_hint.
+
+    com = args.com
+    if com is None:
+        com = resolve_default_com(ports)
+        if com is None:
+            print("no default COM port (use --com)", file=sys.stderr)
+            return 2
+
+    try:
+        baud_list = _parse_baud_list(args)
+    except ValueError as exc:
+        print(f"discover error: {exc}", file=sys.stderr)
+        return 2
+
+    usb_hint = _usb_hint_for_com(ports, int(com))
+    try:
+        result = run_discover(
+            com=int(com),
+            runtime_dir=base,
+            baud_list=baud_list,
+            send_break=not args.no_break,
+            early_stop=not args.no_early_stop,
+            usb_hint=usb_hint,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"discover error: {exc}", file=sys.stderr)
+        return 3
+
+    payload = result.to_dict()
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"run_id:       {result.run_id}")
+        print(f"status:       {result.status}")
+        print(f"duration:     {result.duration_sec}s")
+        print(f"profile_path: {result.profile_path}")
+        print(f"log_file:     {result.log_file}")
+        print(f"workspace:    {result.workspace}")
+
+    if result.status == SUCCESS_DISCOVERED or is_success(result.status):
+        return 0
+    if result.status == FAILED_PROBE_SILENT:
+        return 1
+    if result.status in (FAILED_NO_PORT, _FAILED_CONNECTION_REFUSED):
+        return 2
+    return 3
+
+
+def cmd_profile_show(args: argparse.Namespace) -> int:
+    base = _runtime(args)
+    try:
+        profile = load_profile(base, int(args.com))
+    except FileNotFoundError:
+        print(f"no profile for COM{args.com}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print(f"profile error: {exc}", file=sys.stderr)
+        return 2
+
+    payload = profile.to_dict()
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"COM{profile.com} baud={profile.baud} confidence={profile.confidence}")
+        print(f"port_name: {profile.port_name}")
+        print(f"commands:  {len(profile.commands)}")
+        print(f"run_id:    {profile.run_id}")
+        print(f"at:        {profile.discovered_at}")
+    return 0
+
+
+def cmd_cmds(args: argparse.Namespace) -> int:
+    base = _runtime(args)
+    try:
+        profile = load_profile(base, int(args.com))
+    except FileNotFoundError:
+        print(f"no profile for COM{args.com}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print(f"cmds error: {exc}", file=sys.stderr)
+        return 2
+
+    payload = [c.to_dict() for c in profile.commands]
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        if not profile.commands:
+            print("(no commands)")
+        for c in profile.commands:
+            print(f"{c.id}\t{c.send!r}\t{c.summary}")
+    return 0
+
+
+def cmd_call(args: argparse.Namespace) -> int:
+    base = _runtime(args)
+    try:
+        result = run_call(
+            runtime_dir=base,
+            com=int(args.com),
+            command_id=args.command_id,
+            send=args.send,
+            expect=args.expect,
+            timeout_s=float(args.timeout),
+        )
+    except (FileNotFoundError, ValueError, KeyError) as exc:
+        print(f"call error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print(f"call error: {exc}", file=sys.stderr)
+        return 3
+
+    payload = result.to_dict()
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"run_id: {result.run_id}")
+        print(f"tx:     {result.tx!r}")
+        print(f"rx:     {result.rx!r}")
+        print(f"matched:{result.matched}")
+        print(f"baud:   {result.profile_baud}")
+        print(f"log:    {result.log_file}")
+
+    if result.matched is False:
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -158,6 +478,19 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_doctor(runtime_dir(), tt_bin_dir())
     if args.command == "provision":
         return cmd_provision(args)
+    if args.command == "ports":
+        return cmd_ports(args)
+    if args.command == "discover":
+        return cmd_discover(args)
+    if args.command == "profile":
+        if args.profile_cmd == "show":
+            return cmd_profile_show(args)
+        parser.error(f"unknown profile subcommand: {args.profile_cmd}")
+        return 2
+    if args.command == "cmds":
+        return cmd_cmds(args)
+    if args.command == "call":
+        return cmd_call(args)
     parser.error(f"unknown command: {args.command}")
     return 2
 

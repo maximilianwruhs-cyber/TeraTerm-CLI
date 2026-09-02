@@ -48,6 +48,16 @@ tt-agent-hw provision ^
   --boot-timeout 30
 ```
 
+## Discover + call (unknown UART)
+
+```bat
+tt-agent-hw ports --json
+tt-agent-hw discover --com 7 --json
+tt-agent-hw cmds --com 7 --json
+tt-agent-hw call --com 7 help --json
+```
+
+
 ### Exit codes
 
 | Code | Meaning |
