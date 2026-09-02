@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -151,3 +152,50 @@ def test_call_unknown_id(tmp_path: Path, profile_on_disk: DeviceProfile) -> None
     del profile_on_disk
     with pytest.raises(KeyError):
         run_call(runtime_dir=tmp_path, com=7, command_id="nope")
+
+
+def test_call_timeout_waits_for_delayed_first_byte(
+    tmp_path: Path, profile_on_disk: DeviceProfile
+) -> None:
+    del profile_on_disk
+
+    class _DelayedHelp(FakeSerialTransport):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self._delay_s = 1.0
+            self._payload = b"late OK\r\n"
+            self._t0: float | None = None
+            self._sent = False
+
+        def write(self, data: bytes) -> None:
+            super().write(data)
+            self._t0 = time.monotonic()
+            self._sent = False
+            self._rx.clear()
+
+        def read(self, max_bytes: int = 4096, timeout: float | None = None) -> bytes:
+            del max_bytes, timeout
+            self._require_open()
+            if self._t0 is None:
+                return b""
+            if time.monotonic() - self._t0 < self._delay_s:
+                return b""
+            if not self._sent:
+                self._sent = True
+                return self._payload
+            return b""
+
+    def factory(port: str, baud: int) -> FakeSerialTransport:
+        return _DelayedHelp(port=port, baud=baud, script={})
+
+    result = run_call(
+        runtime_dir=tmp_path,
+        com=7,
+        command_id="help",
+        expect="OK",
+        timeout_s=2.0,
+        transport_factory=factory,
+    )
+    assert result.matched is True
+    assert "OK" in result.rx
+

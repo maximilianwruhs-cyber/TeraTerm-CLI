@@ -25,14 +25,9 @@ def _resolve_tx(
     command_id: str | None,
     send: str | None,
 ) -> str:
-    has_id = command_id is not None
-    has_send = send is not None
-    if has_id == has_send:
-        raise ValueError("exactly one of command_id or send is required")
-    if has_send:
-        assert send is not None
+    if send is not None:
         return send
-    assert command_id is not None
+    assert command_id is not None  # XOR already enforced by run_call
     for cmd in profile.commands:
         if cmd.id == command_id:
             return cmd.send
@@ -74,7 +69,11 @@ def run_call(
     try:
         transport.reset_input_buffer()
         transport.write(append_cr(tx))
-        rx_bytes = read_until_quiet(transport, max_s=timeout_s)
+        rx_bytes = read_until_quiet(
+            transport,
+            max_s=timeout_s,
+            first_byte_s=timeout_s,
+        )
     finally:
         transport.close()
 
