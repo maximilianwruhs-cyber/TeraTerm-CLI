@@ -89,6 +89,44 @@ def test_help_raw_preserves_crlf_and_matches_sha(tmp_path: Path) -> None:
     assert result.profile.fingerprint["help_raw_sha256"] == hashlib.sha256(on_disk).hexdigest()
 
 
+def test_early_stop_skips_pure_length_noise(tmp_path: Path) -> None:
+    """Printable noise must not early-stop before a real help baud is tried."""
+    help_body = b"\r\nAvailable commands:\r\nreset - reboot\r\nhelp - help\r\n>"
+    noise = b"A" * 64
+
+    def factory(port: str, baud: int) -> FakeSerialTransport:
+        script: dict[int, list[tuple[bytes | None, bytes]]] = {}
+        if baud == 115200:
+            script[115200] = [
+                (b"\r", noise),
+                (b"help", b""),
+                (b"?", b""),
+                (b"AT", b""),
+            ]
+        elif baud == 9600:
+            script[9600] = [
+                (b"\r", b""),
+                (b"help", help_body),
+                (b"?", b""),
+                (b"AT", b""),
+                (b"help", help_body),
+            ]
+        return FakeSerialTransport(port=port, baud=baud, script=script)
+
+    result = run_discover(
+        com=7,
+        runtime_dir=tmp_path,
+        baud_list=[115200, 9600],
+        transport_factory=factory,
+        send_break=False,
+        early_stop=True,
+    )
+    assert "SUCCESS_DISCOVERED" in result.status
+    assert result.profile is not None
+    assert result.profile.baud == 9600
+    assert any(c.send == "reset" for c in result.profile.commands)
+
+
 def test_read_until_quiet_waits_for_delayed_first_byte() -> None:
     class _DelayedFirstByte:
         """Empty until wall-clock delay, then one payload, then silence."""

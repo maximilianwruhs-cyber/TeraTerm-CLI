@@ -10,6 +10,7 @@ from tt_agent_hw.status import FAILED_PROBE_SILENT, SUCCESS_DISCOVERED
 
 def test_cli_discover_success(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("TT_AGENT_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr("tt_agent_hw.cli.list_ports", lambda **kwargs: [])
 
     def fake_run_discover(**kwargs):
         assert kwargs["com"] == 7
@@ -29,6 +30,7 @@ def test_cli_discover_success(monkeypatch, tmp_path: Path) -> None:
 
 def test_cli_discover_silent_exit_1(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("TT_AGENT_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr("tt_agent_hw.cli.list_ports", lambda **kwargs: [])
 
     def fake_run_discover(**kwargs):
         return DiscoverResult(
@@ -145,6 +147,8 @@ def test_cli_discover_invalid_baud_list(monkeypatch, tmp_path: Path) -> None:
 
     monkeypatch.setattr("tt_agent_hw.cli.run_discover", boom)
     assert main(["discover", "--com", "7", "--baud-list", "abc"]) == 2
+    assert main(["discover", "--com", "7", "--baud-list", ""]) == 2
+    assert main(["discover", "--com", "7", "--baud-list", ","]) == 2
 
 
 def test_cli_discover_passes_usb_hint(monkeypatch, tmp_path: Path) -> None:

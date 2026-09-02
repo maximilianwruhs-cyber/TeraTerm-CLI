@@ -51,3 +51,20 @@ def test_id_collision_suffix():
     assert "at_gmr" in ids
     assert "at_gmr_2" in ids
     assert len(ids) == len(set(ids))
+
+
+def test_extract_rejects_prose_stopwords():
+    raw = (
+        "Usage: help [command]\n"
+        "Error: unknown command\n"
+        "Commands\n"
+        "Available: list\n"
+        "reset - reboot board\n"
+    )
+    cmds = extract_commands(raw, productive_nudges=[])
+    sends = [c.send for c in cmds]
+    assert "Usage" not in sends
+    assert "Error" not in sends
+    assert "Commands" not in sends
+    assert "Available" not in sends
+    assert "reset" in sends

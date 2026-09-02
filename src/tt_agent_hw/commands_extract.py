@@ -14,6 +14,23 @@ _SLUG_RE = re.compile(r"[^a-zA-Z0-9]+")
 _JUNK_RE = re.compile(r"^[\d.\-_/\\]+$")
 _PATH_RE = re.compile(r"[/\\]")
 _BULLET_RE = re.compile(r"^[\-\*\u2022\u25cf\u00b7]\s+")
+_STOPWORDS = frozenset(
+    {
+        "usage",
+        "error",
+        "warning",
+        "note",
+        "notes",
+        "syntax",
+        "example",
+        "examples",
+        "command",
+        "commands",
+        "options",
+        "available",
+        "type",
+    }
+)
 
 
 def slug_id(send: str) -> str:
@@ -40,6 +57,8 @@ def _is_junk_token(token: str) -> bool:
     if token == "?":
         return False
     if len(token) == 1:
+        return True
+    if token.lower() in _STOPWORDS:
         return True
     if _JUNK_RE.fullmatch(token):
         return True

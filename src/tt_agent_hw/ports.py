@@ -11,6 +11,7 @@ from typing import Any
 from serial.tools import list_ports as serial_list_ports
 
 from tt_agent_hw import paths
+from tt_agent_hw.profile_store import profile_path
 
 _COM_RE = re.compile(r"^COM(\d+)$", re.IGNORECASE)
 _BT_RE = re.compile(r"BTHENUM|Bluetooth", re.IGNORECASE)
@@ -54,7 +55,7 @@ def list_ports(
         com = parse_com_number(name)
         has_profile = False
         if com is not None:
-            has_profile = (profiles / f"COM{com}.json").is_file()
+            has_profile = profile_path(root, com).is_file()
         result.append(
             PortInfo(
                 name=name,

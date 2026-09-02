@@ -21,6 +21,20 @@ _KEYWORDS = (
 _PROMPT_ENDS = (">", "#", "$", ":")
 
 
+def console_evidence(data: bytes) -> bool:
+    """True when RX shows keyword or prompt markers beyond raw printable length."""
+    if not data:
+        return False
+    text = data.decode("latin-1", errors="replace").lower()
+    for kw in _KEYWORDS:
+        if kw in text:
+            return True
+    for line in text.splitlines():
+        if line.rstrip().endswith(_PROMPT_ENDS):
+            return True
+    return False
+
+
 def score_rx(data: bytes) -> float:
     if not data:
         return 0.0

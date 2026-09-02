@@ -13,7 +13,7 @@ from tt_agent_hw import __version__
 from tt_agent_hw.commands_extract import extract_commands
 from tt_agent_hw.models import BaudAttempt, DeviceProfile, DiscoverResult
 from tt_agent_hw.profile_store import save_profile
-from tt_agent_hw.scoring import SILENCE_FLOOR, STRONG_SCORE, score_rx
+from tt_agent_hw.scoring import SILENCE_FLOOR, STRONG_SCORE, console_evidence, score_rx
 from tt_agent_hw.serial_io import read_until_quiet  # re-export for callers/tests
 from tt_agent_hw.serial_transport import PyserialTransport, SerialTransport
 from tt_agent_hw.status import (
@@ -35,7 +35,7 @@ NUDGES: list[tuple[str, bytes]] = [
 _DEFAULT_FRAMING = {"bytesize": 8, "parity": "N", "stopbits": 1}
 _FAILED_CONNECTION_REFUSED = "STATUS=FAILED_CONNECTION_REFUSED"
 _STATUS_INITIALIZING = "STATUS=INITIALIZING"
-_MIN_STRONG_BYTES = 1
+_MIN_STRONG_BYTES = 16
 
 # Logical TX payload for each nudge (without trailing CR), used as command send text.
 _NUDGE_SEND: dict[str, str] = {
@@ -116,7 +116,8 @@ def _harvest_help(
     _name, payload = _preferred_harvest_nudge(productive)
     transport.reset_input_buffer()
     transport.write(payload)
-    harvested = read_until_quiet(transport)
+    # Harvest cap must clear a full help dump at low baud; quiet window still ends early.
+    harvested = read_until_quiet(transport, max_s=15.0)
     return harvested if harvested else fallback_raw
 
 
@@ -217,7 +218,11 @@ def run_discover(
                     "per_nudge": per_nudge,
                 }
 
-            strong = score >= STRONG_SCORE and len(aggregate) >= _MIN_STRONG_BYTES
+            strong = (
+                score >= STRONG_SCORE
+                and len(aggregate) >= _MIN_STRONG_BYTES
+                and console_evidence(aggregate)
+            )
             if early_stop and strong and productive:
                 # Harvest on the live link before close (keeps fake FIFO intact).
                 fallback = next(

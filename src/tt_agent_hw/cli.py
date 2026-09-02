@@ -312,7 +312,7 @@ def _parse_baud_list(args: argparse.Namespace) -> list[int] | None:
     """Return baud list or None for discover defaults. Raises ValueError on bad input."""
     if args.baud is not None:
         return [int(args.baud)]
-    if args.baud_list:
+    if args.baud_list is not None:
         parts = [p.strip() for p in str(args.baud_list).split(",") if p.strip()]
         if not parts:
             raise ValueError("empty --baud-list")
