@@ -123,3 +123,64 @@ def test_cli_call_matched_true(monkeypatch, tmp_path: Path) -> None:
 
     monkeypatch.setattr("tt_agent_hw.cli.run_call", fake_run_call)
     assert main(["call", "--com", "7", "help"]) == 0
+
+
+def test_cli_discover_invalid_baud_list(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("TT_AGENT_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "tt_agent_hw.cli.list_ports",
+        lambda **kwargs: [
+            PortInfo(
+                name="COM7",
+                com=7,
+                description="USB Serial",
+                hardware_id="USB\\VID_1234",
+                has_profile=False,
+            )
+        ],
+    )
+
+    def boom(**kwargs):
+        raise AssertionError("run_discover should not be called for bad baud-list")
+
+    monkeypatch.setattr("tt_agent_hw.cli.run_discover", boom)
+    assert main(["discover", "--com", "7", "--baud-list", "abc"]) == 2
+
+
+def test_cli_discover_passes_usb_hint(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("TT_AGENT_RUNTIME_DIR", str(tmp_path))
+    seen: dict = {}
+
+    monkeypatch.setattr(
+        "tt_agent_hw.cli.list_ports",
+        lambda **kwargs: [
+            PortInfo(
+                name="COM7",
+                com=7,
+                description="USB Serial Device",
+                hardware_id="USB\\VID_ABCD&PID_0001",
+                has_profile=False,
+            )
+        ],
+    )
+
+    def fake_run_discover(**kwargs):
+        seen.update(kwargs)
+        return DiscoverResult(
+            run_id="run_hint",
+            status=SUCCESS_DISCOVERED,
+            profile_path=None,
+            log_file=str(tmp_path / "log.txt"),
+            duration_sec=0.1,
+            workspace=str(tmp_path / "ws"),
+            profile=None,
+        )
+
+    monkeypatch.setattr("tt_agent_hw.cli.run_discover", fake_run_discover)
+    assert main(["discover", "--com", "7"]) == 0
+    assert seen.get("usb_hint") == {
+        "name": "COM7",
+        "description": "USB Serial Device",
+        "hardware_id": "USB\\VID_ABCD&PID_0001",
+    }
+

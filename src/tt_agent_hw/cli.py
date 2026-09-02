@@ -8,12 +8,9 @@ import sys
 from pathlib import Path
 
 from tt_agent_hw import __version__
-from tt_agent_hw.call_session import run_call
 from tt_agent_hw.controller import PreflightError, TeraTermAgentController
-from tt_agent_hw.discover import run_discover
 from tt_agent_hw.models import TargetJob
 from tt_agent_hw.paths import runtime_dir, tt_bin_dir
-from tt_agent_hw.ports import list_ports, resolve_default_com
 from tt_agent_hw.profile_store import load_profile
 from tt_agent_hw.status import (
     FAILED_NO_PORT,
@@ -25,6 +22,35 @@ from tt_agent_hw.workspace import ensure_runtime_writable
 
 # Discover connection-refused token (also in status.KNOWN_FAILURE).
 _FAILED_CONNECTION_REFUSED = "STATUS=FAILED_CONNECTION_REFUSED"
+
+
+def list_ports(*, runtime_dir: Path | None = None, enumerator=None):
+    """Lazy seam: ports pulls pyserial; monkeypatch this name in tests."""
+    from tt_agent_hw.ports import list_ports as _impl
+
+    return _impl(runtime_dir=runtime_dir, enumerator=enumerator)
+
+
+def resolve_default_com(ports):
+    """Lazy seam for default COM selection."""
+    from tt_agent_hw.ports import resolve_default_com as _impl
+
+    return _impl(ports)
+
+
+def run_discover(**kwargs):
+    """Lazy seam: discover pulls serial transport; monkeypatch in tests."""
+    from tt_agent_hw.discover import run_discover as _impl
+
+    return _impl(**kwargs)
+
+
+def run_call(**kwargs):
+    """Lazy seam: call_session pulls serial transport; monkeypatch in tests."""
+    from tt_agent_hw.call_session import run_call as _impl
+
+    return _impl(**kwargs)
+
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -283,29 +309,56 @@ def cmd_ports(args: argparse.Namespace) -> int:
 
 
 def _parse_baud_list(args: argparse.Namespace) -> list[int] | None:
+    """Return baud list or None for discover defaults. Raises ValueError on bad input."""
     if args.baud is not None:
         return [int(args.baud)]
     if args.baud_list:
         parts = [p.strip() for p in str(args.baud_list).split(",") if p.strip()]
-        return [int(p) for p in parts]
+        if not parts:
+            raise ValueError("empty --baud-list")
+        try:
+            return [int(p) for p in parts]
+        except ValueError as exc:
+            raise ValueError(f"invalid --baud-list: {args.baud_list!r}") from exc
+    return None
+
+
+def _usb_hint_for_com(ports, com: int) -> dict | None:
+    for p in ports:
+        if p.com == com:
+            return {
+                "name": p.name,
+                "description": p.description,
+                "hardware_id": p.hardware_id,
+            }
     return None
 
 
 def cmd_discover(args: argparse.Namespace) -> int:
     base = _runtime(args)
-    com = args.com
-    if com is None:
-        try:
-            ports = list_ports(runtime_dir=base)
-        except Exception as exc:  # noqa: BLE001
+    ports: list = []
+    try:
+        ports = list_ports(runtime_dir=base)
+    except Exception as exc:  # noqa: BLE001
+        if args.com is None:
             print(f"ports error: {exc}", file=sys.stderr)
             return 2
+        # Explicit --com: continue without enumeration / usb_hint.
+
+    com = args.com
+    if com is None:
         com = resolve_default_com(ports)
         if com is None:
             print("no default COM port (use --com)", file=sys.stderr)
             return 2
 
-    baud_list = _parse_baud_list(args)
+    try:
+        baud_list = _parse_baud_list(args)
+    except ValueError as exc:
+        print(f"discover error: {exc}", file=sys.stderr)
+        return 2
+
+    usb_hint = _usb_hint_for_com(ports, int(com))
     try:
         result = run_discover(
             com=int(com),
@@ -313,6 +366,7 @@ def cmd_discover(args: argparse.Namespace) -> int:
             baud_list=baud_list,
             send_break=not args.no_break,
             early_stop=not args.no_early_stop,
+            usb_hint=usb_hint,
         )
     except Exception as exc:  # noqa: BLE001
         print(f"discover error: {exc}", file=sys.stderr)
